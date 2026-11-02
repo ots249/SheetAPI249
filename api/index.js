@@ -39,7 +39,7 @@ export default async function handler(req,res){
   if(manage&&req.method==="GET"&&manage[2]==="analytics"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const pr=await ownedProject(manage[1],s.userId);if(!pr)return send(res,404,{error:"Project not found"});return send(res,200,{success:true,stats:await redis.get("stats:"+pr.id)||{requests:0,success:0,errors:0}})}
   if(manage&&manage[2]==="key"&&req.method==="POST"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const pr=await ownedProject(manage[1],s.userId);if(!pr)return send(res,404,{error:"Project not found"});const key="s249_"+random();pr.apiKeyHash=hash(key);const list=await redis.get("projects:"+s.userId)||[];await redis.set("projects:"+s.userId,list.map(x=>x.id===pr.id?pr:x),{ex:31536000});await redis.set("project:"+pr.slug,pr,{ex:31536000});return send(res,200,{success:true,apiKey:key})}
   if(manage&&manage[2]==="settings"&&req.method==="PATCH"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const pr=await ownedProject(manage[1],s.userId);if(!pr)return send(res,404,{error:"Project not found"});const b=await body(req);if(b.access!==undefined){if(!["public","private"].includes(b.access))return send(res,400,{error:"Invalid access mode"});pr.access=b.access}if(b.allowWrite!==undefined){pr.allowWrite=!!b.allowWrite;pr.permissions={...(pr.permissions||{read:true}),write:!!b.allowWrite}}if(b.permissions!==undefined){if(!b.permissions||typeof b.permissions!=="object"||Array.isArray(b.permissions))return send(res,400,{error:"permissions must be an object"});pr.permissions={read:b.permissions.read!==false,write:b.permissions.write===true};pr.allowWrite=pr.permissions.write}if(b.allowedIps!==undefined){if(!Array.isArray(b.allowedIps)||b.allowedIps.length>50||b.allowedIps.some(x=>typeof x!=="string"||x.length>64))return send(res,400,{error:"allowedIps must be an array of up to 50 IP addresses"});pr.allowedIps=[...new Set(b.allowedIps)]}if(b.cacheSeconds!==undefined)pr.cacheSeconds=Math.max(0,Math.min(Number(b.cacheSeconds)||0,86400));const list=await redis.get("projects:"+s.userId)||[];await redis.set("projects:"+s.userId,list.map(x=>x.id===pr.id?pr:x),{ex:31536000});await redis.set("project:"+pr.slug,pr,{ex:31536000});await bumpCacheVersion(pr.slug);return send(res,200,{success:true,project:{id:pr.id,access:pr.access,cacheSeconds:pr.cacheSeconds}})}
-  const refresh=p.match(/^\/api\/projects\/([^/]+)\/refresh$/);if(refresh&&req.method==="POST"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const all=await redis.get("projects:"+s.userId)||[],pr=all.find(x=>x.id===refresh[1]);if(!pr)return send(res,404,{error:"Project not found"});await redis.incr("cachever:"+pr.slug);return send(res,200,{success:true})}
+  const refresh=p.match(/^\/api\/projects\/([^/]+)\/refresh$/);if(refresh&&req.method==="POST"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const all=await redis.get("projects:"+s.userId)||[],pr=all.find(x=>x.id===refresh[1]);if(!pr)return send(res,404,{error:"Project not found"});await bumpCacheVersion(pr.slug);return send(res,200,{success:true})}
   const data=p.match(/^\/api\/v1\/([^/]+)\/([^/]+)$/);
   if(data&&["GET","POST","PUT","PATCH","DELETE"].includes(req.method)){
    const pr=await redis.get("project:"+data[1]);
@@ -54,7 +54,7 @@ export default async function handler(req,res){
    res.setHeader("X-RateLimit-Limit",String(rateLimit));res.setHeader("X-RateLimit-Remaining",String(Math.max(0,rateLimit-rateCount)));
    if(rateCount>rateLimit){res.setHeader("Retry-After","60");return send(res,429,{success:false,error:"Rate limit exceeded. Try again in 60 seconds."})}
    await bump("requests");
-   const tracked=async(status,payload)=>{await bump(status>=200&&status<400?"success":"errors");try{const log={at:new Date().toISOString(),method:req.method,status,ipHash:hash(ip).slice(0,16),sheet:pr.sheetName};const auditKey="audit:"+pr.id;await redis.lpush(auditKey,JSON.stringify(log));await redis.ltrim(auditKey,0,499);await redis.expire(auditKey,7776000)}catch(auditError){console.error("Audit log write failed",auditError)}return send(res,status,payload)};
+   const tracked=async(status,payload)=>{await bump(status>=200&&status<400?"success":"errors");try{const log={at:new Date().toISOString(),method:req.method,status,ipHash:hash(ip).slice(0,16),sheet:pr.sheetName};const auditKey="audit:"+pr.id,pipe=redis.pipeline();pipe.lpush(auditKey,JSON.stringify(log));pipe.ltrim(auditKey,0,499);pipe.expire(auditKey,7776000);await pipe.exec()}catch(auditError){console.error("Audit log write failed",auditError)}return send(res,status,payload)};
    try{
     if(decodeURIComponent(data[2])!==pr.sheetName)return await tracked(403,{success:false,error:"Sheet not configured"});
     const key=req.headers["x-api-key"];
@@ -69,11 +69,12 @@ export default async function handler(req,res){
      if(req.method==="POST"){
       const rows=Array.isArray(b.data)?b.data:[b.data??b];
       if(!rows.length||rows.some(x=>!x||typeof x!=="object"||Array.isArray(x)))return await tracked(400,{success:false,error:"Send data as an object or array of objects"});
+      if(rows.length>500)return await tracked(413,{success:false,error:"Batch limit is 500 rows per request"});
       const meta=await sheets.spreadsheets.values.get({spreadsheetId:pr.spreadsheetId,range:quoted+"!1:1"}),headers=meta.data.values?.[0]||[];
       if(!headers.length)return await tracked(400,{success:false,error:"First row must contain column headers"});
       const values=rows.map(x=>headers.map(h=>x[h]??""));
       const result=await sheets.spreadsheets.values.append({spreadsheetId:pr.spreadsheetId,range:quoted+"!A:ZZ",valueInputOption:"USER_ENTERED",insertDataOption:"INSERT_ROWS",requestBody:{values}});
-      await redis.incr("cachever:"+pr.slug);
+      await bumpCacheVersion(pr.slug);
       return await tracked(201,{success:true,insertedRows:values.length,updatedRange:result.data.updates?.updatedRange});
      }
      const row=Number(u.searchParams.get("row")??b.row);
@@ -85,7 +86,7 @@ export default async function handler(req,res){
       const meta=await sheets.spreadsheets.get({spreadsheetId:pr.spreadsheetId,fields:"sheets(properties(sheetId,title))"}),sh=meta.data.sheets?.find(x=>x.properties.title===pr.sheetName);
       if(!sh)return await tracked(404,{success:false,error:"Sheet not found"});
       await sheets.spreadsheets.batchUpdate({spreadsheetId:pr.spreadsheetId,requestBody:{requests:[{deleteDimension:{range:{sheetId:sh.properties.sheetId,dimension:"ROWS",startIndex:row-1,endIndex:row}}}]}});
-      await redis.incr("cachever:"+pr.slug);
+      await bumpCacheVersion(pr.slug);
       return await tracked(200,{success:true,deletedRow:row});
      }
      const meta=await sheets.spreadsheets.values.get({spreadsheetId:pr.spreadsheetId,range:quoted+"!1:1"}),headers=meta.data.values?.[0]||[];
@@ -93,7 +94,7 @@ export default async function handler(req,res){
      const next=req.method==="PUT"?Object.fromEntries(headers.map(h=>[h,b.data?.[h]??""])):{...old,...(b.data||b)};
      const values=[headers.map(h=>next[h]??"")];
      await sheets.spreadsheets.values.update({spreadsheetId:pr.spreadsheetId,range,valueInputOption:"USER_ENTERED",requestBody:{values}});
-     await redis.incr("cachever:"+pr.slug);
+     await bumpCacheVersion(pr.slug);
      return await tracked(200,{success:true,updatedRow:row,data:next});
     }
     const searchParam=u.searchParams.get("search")||"";
@@ -124,7 +125,7 @@ export default async function handler(req,res){
       if(age<=freshFor)return await tracked(200,{...cached.payload,cached:true,cacheState:"fresh"});
       const lockKey="cache-refresh:"+hash(cacheKey),lock=await redis.set(lockKey,"1",{nx:true,ex:30});
       if(lock==="OK"){
-       refreshData().catch(async err=>{console.error("Stale cache refresh failed",err);try{await redis.del(lockKey)}catch{}});
+       refreshData().catch(err=>{console.error("Stale cache refresh failed",err)}).finally(()=>redis.del(lockKey).catch(err=>console.error("Cache refresh lock cleanup failed",err)));
        return await tracked(200,{...cached.payload,cached:true,stale:true,cacheState:"stale"});
       }
       return await tracked(200,{...cached.payload,cached:true,stale:true,cacheState:"refreshing"});
