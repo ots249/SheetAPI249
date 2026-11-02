@@ -1,0 +1,1 @@
+import React from "react"; export default function App(){return <main><h1>SheetAPI 249</h1><p>Google Sheets to JSON API</p><a href="/api/auth/google">Connect Google</a></main>}
