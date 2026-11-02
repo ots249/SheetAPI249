@@ -30,10 +30,65 @@ export default async function handler(req,res){
   if(manage&&manage[2]==="key"&&req.method==="POST"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const pr=await ownedProject(manage[1],s.userId);if(!pr)return send(res,404,{error:"Project not found"});const key="s249_"+random();pr.apiKeyHash=hash(key);const list=await redis.get("projects:"+s.userId)||[];await redis.set("projects:"+s.userId,list.map(x=>x.id===pr.id?pr:x),{ex:31536000});await redis.set("project:"+pr.slug,pr,{ex:31536000});return send(res,200,{success:true,apiKey:key})}
   if(manage&&manage[2]==="settings"&&req.method==="PATCH"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const pr=await ownedProject(manage[1],s.userId);if(!pr)return send(res,404,{error:"Project not found"});const b=await body(req);if(b.access!==undefined){if(!["public","private"].includes(b.access))return send(res,400,{error:"Invalid access mode"});pr.access=b.access}if(b.allowWrite!==undefined)pr.allowWrite=!!b.allowWrite;if(b.cacheSeconds!==undefined)pr.cacheSeconds=Math.max(0,Math.min(Number(b.cacheSeconds)||0,86400));const list=await redis.get("projects:"+s.userId)||[];await redis.set("projects:"+s.userId,list.map(x=>x.id===pr.id?pr:x),{ex:31536000});await redis.set("project:"+pr.slug,pr,{ex:31536000});await redis.del("data:"+pr.slug);return send(res,200,{success:true,project:{id:pr.id,access:pr.access,cacheSeconds:pr.cacheSeconds}})}
   const refresh=p.match(/^\/api\/projects\/([^/]+)\/refresh$/);if(refresh&&req.method==="POST"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const all=await redis.get("projects:"+s.userId)||[],pr=all.find(x=>x.id===refresh[1]);if(!pr)return send(res,404,{error:"Project not found"});await redis.del("data:"+pr.slug);return send(res,200,{success:true})}
-  const data=p.match(/^\/api\/v1\/([^/]+)\/([^/]+)$/);if(data&&["GET","POST","PUT","PATCH","DELETE"].includes(req.method)){const pr=await redis.get("project:"+data[1]);if(!pr)return send(res,404,{success:false,error:"Project not found"});if(decodeURIComponent(data[2])!==pr.sheetName)return send(res,403,{success:false,error:"Sheet not configured"});const key=req.headers["x-api-key"];if(pr.access==="private"&&(!key||hash(key)!==pr.apiKeyHash))return send(res,401,{success:false,error:"Invalid API key"});if(req.method!=="GET"&&(!key||hash(key)!==pr.apiKeyHash))return send(res,401,{success:false,error:"A valid X-API-Key is required for write operations"});if(req.method!=="GET"&&!pr.allowWrite)return send(res,403,{success:false,error:"Write access is disabled for this project"});if(req.method!=="GET"){const b=await body(req);const user=await redis.get("user:"+pr.userId),c=oauth();c.setCredentials(user.tokens);const sheets=google.sheets({version:"v4",auth:c}),quoted="'"+pr.sheetName.replace(/'/g,"''")+"'";
-if(req.method==="POST"){const rows=Array.isArray(b.data)?b.data:[b.data??b];if(!rows.length||rows.some(x=>!x||typeof x!=="object"||Array.isArray(x)))return send(res,400,{success:false,error:"Send data as an object or array of objects"});const meta=await sheets.spreadsheets.values.get({spreadsheetId:pr.spreadsheetId,range:quoted+"!1:1"}),headers=meta.data.values?.[0]||[];if(!headers.length)return send(res,400,{success:false,error:"First row must contain column headers"});const values=rows.map(x=>headers.map(h=>x[h]??""));const result=await sheets.spreadsheets.values.append({spreadsheetId:pr.spreadsheetId,range:quoted+"!A:ZZ",valueInputOption:"USER_ENTERED",insertDataOption:"INSERT_ROWS",requestBody:{values}});await redis.del("data:"+pr.slug);return send(res,201,{success:true,insertedRows:values.length,updatedRange:result.data.updates?.updatedRange})}
-const row=Number(u.searchParams.get("row")??b.row);if(!Number.isInteger(row)||row<2)return send(res,400,{success:false,error:"Specify row number >= 2 using ?row= or body.row"});const range=quoted+"!A"+row+":ZZ"+row;const current=await sheets.spreadsheets.values.get({spreadsheetId:pr.spreadsheetId,range,valueRenderOption:"UNFORMATTED_VALUE"});if(!current.data.values?.length)return send(res,404,{success:false,error:"Row not found"});if(req.method==="DELETE"){const meta=await sheets.spreadsheets.get({spreadsheetId:pr.spreadsheetId,fields:"sheets(properties(sheetId,title))"}),sh=meta.data.sheets?.find(x=>x.properties.title===pr.sheetName);if(!sh)return send(res,404,{success:false,error:"Sheet not found"});await sheets.spreadsheets.batchUpdate({spreadsheetId:pr.spreadsheetId,requestBody:{requests:[{deleteDimension:{range:{sheetId:sh.properties.sheetId,dimension:"ROWS",startIndex:row-1,endIndex:row}}}]}});await redis.del("data:"+pr.slug);return send(res,200,{success:true,deletedRow:row})}
-const meta=await sheets.spreadsheets.values.get({spreadsheetId:pr.spreadsheetId,range:quoted+"!1:1"}),headers=meta.data.values?.[0]||[],old=Object.fromEntries(headers.map((h,i)=>[h,current.data.values[0][i]??""])),next=req.method==="PUT"?Object.fromEntries(headers.map(h=>[h,b.data?.[h]??""])):{...old,...(b.data||b)},values=[headers.map(h=>next[h]??"")];await sheets.spreadsheets.values.update({spreadsheetId:pr.spreadsheetId,range,valueInputOption:"USER_ENTERED",requestBody:{values}});await redis.del("data:"+pr.slug);return send(res,200,{success:true,updatedRow:row,data:next})}if(pr.cacheSeconds>0){const cache=await redis.get("data:"+pr.slug);if(cache)return send(res,200,{...cache,cached:true})}const user=await redis.get("user:"+pr.userId),c=oauth();c.setCredentials(user.tokens);const range="'"+pr.sheetName.replace(/'/g,"''")+"'!A:ZZ";const result=await google.sheets({version:"v4",auth:c}).spreadsheets.values.get({spreadsheetId:pr.spreadsheetId,range,valueRenderOption:"UNFORMATTED_VALUE"});const values=result.data.values||[],headers=(values[0]||[]).map((v,i)=>String(v||"column_"+(i+1)));let rows=values.slice(1).filter(r=>r.some(v=>v!==""&&v!==null)).map(r=>Object.fromEntries(headers.map((h,i)=>[h,r[i]??null])));const search=u.searchParams.get("search");if(search)rows=rows.filter(r=>JSON.stringify(r).toLowerCase().includes(search.toLowerCase()));const total=rows.length,limit=Math.min(1000,Math.max(1,Number(u.searchParams.get("limit")||100))),offset=Math.max(0,Number(u.searchParams.get("offset")||0));const out={success:true,project:pr.slug,sheet:pr.sheetName,total,limit,offset,data:rows.slice(offset,offset+limit)};if(pr.cacheSeconds>0)await redis.set("data:"+pr.slug,out,{ex:pr.cacheSeconds});return send(res,200,{...out,cached:false})}
+  const data=p.match(/^\/api\/v1\/([^/]+)\/([^/]+)$/);
+  if(data&&["GET","POST","PUT","PATCH","DELETE"].includes(req.method)){
+   const pr=await redis.get("project:"+data[1]);
+   if(!pr)return send(res,404,{success:false,error:"Project not found"});
+   const bump=async(field)=>{const k="stats:"+pr.id,s=await redis.get(k)||{requests:0,success:0,errors:0};s[field]=(Number(s[field])||0)+1;await redis.set(k,s,{ex:31536000});};
+   await bump("requests");
+   const tracked=async(status,payload)=>{await bump(status>=200&&status<400?"success":"errors");return send(res,status,payload)};
+   try{
+    if(decodeURIComponent(data[2])!==pr.sheetName)return await tracked(403,{success:false,error:"Sheet not configured"});
+    const key=req.headers["x-api-key"];
+    if(pr.access==="private"&&(!key||hash(key)!==pr.apiKeyHash))return await tracked(401,{success:false,error:"Invalid API key"});
+    if(req.method!=="GET"&&(!key||hash(key)!==pr.apiKeyHash))return await tracked(401,{success:false,error:"A valid X-API-Key is required for write operations"});
+    if(req.method!=="GET"&&!pr.allowWrite)return await tracked(403,{success:false,error:"Write access is disabled for this project"});
+    if(req.method!=="GET"){
+     const b=await body(req),user=await redis.get("user:"+pr.userId),c=oauth();c.setCredentials(user.tokens);
+     const sheets=google.sheets({version:"v4",auth:c}),quoted="'"+pr.sheetName.replace(/'/g,"''")+"'";
+     if(req.method==="POST"){
+      const rows=Array.isArray(b.data)?b.data:[b.data??b];
+      if(!rows.length||rows.some(x=>!x||typeof x!=="object"||Array.isArray(x)))return await tracked(400,{success:false,error:"Send data as an object or array of objects"});
+      const meta=await sheets.spreadsheets.values.get({spreadsheetId:pr.spreadsheetId,range:quoted+"!1:1"}),headers=meta.data.values?.[0]||[];
+      if(!headers.length)return await tracked(400,{success:false,error:"First row must contain column headers"});
+      const values=rows.map(x=>headers.map(h=>x[h]??""));
+      const result=await sheets.spreadsheets.values.append({spreadsheetId:pr.spreadsheetId,range:quoted+"!A:ZZ",valueInputOption:"USER_ENTERED",insertDataOption:"INSERT_ROWS",requestBody:{values}});
+      await redis.del("data:"+pr.slug);
+      return await tracked(201,{success:true,insertedRows:values.length,updatedRange:result.data.updates?.updatedRange});
+     }
+     const row=Number(u.searchParams.get("row")??b.row);
+     if(!Number.isInteger(row)||row<2)return await tracked(400,{success:false,error:"Specify row number >= 2 using ?row= or body.row"});
+     const range=quoted+"!A"+row+":ZZ"+row;
+     const current=await sheets.spreadsheets.values.get({spreadsheetId:pr.spreadsheetId,range,valueRenderOption:"UNFORMATTED_VALUE"});
+     if(!current.data.values?.length)return await tracked(404,{success:false,error:"Row not found"});
+     if(req.method==="DELETE"){
+      const meta=await sheets.spreadsheets.get({spreadsheetId:pr.spreadsheetId,fields:"sheets(properties(sheetId,title))"}),sh=meta.data.sheets?.find(x=>x.properties.title===pr.sheetName);
+      if(!sh)return await tracked(404,{success:false,error:"Sheet not found"});
+      await sheets.spreadsheets.batchUpdate({spreadsheetId:pr.spreadsheetId,requestBody:{requests:[{deleteDimension:{range:{sheetId:sh.properties.sheetId,dimension:"ROWS",startIndex:row-1,endIndex:row}}}]}});
+      await redis.del("data:"+pr.slug);
+      return await tracked(200,{success:true,deletedRow:row});
+     }
+     const meta=await sheets.spreadsheets.values.get({spreadsheetId:pr.spreadsheetId,range:quoted+"!1:1"}),headers=meta.data.values?.[0]||[];
+     const old=Object.fromEntries(headers.map((h,i)=>[h,current.data.values[0][i]??""]));
+     const next=req.method==="PUT"?Object.fromEntries(headers.map(h=>[h,b.data?.[h]??""])):{...old,...(b.data||b)};
+     const values=[headers.map(h=>next[h]??"")];
+     await sheets.spreadsheets.values.update({spreadsheetId:pr.spreadsheetId,range,valueInputOption:"USER_ENTERED",requestBody:{values}});
+     await redis.del("data:"+pr.slug);
+     return await tracked(200,{success:true,updatedRow:row,data:next});
+    }
+    if(pr.cacheSeconds>0){const cache=await redis.get("data:"+pr.slug);if(cache)return await tracked(200,{...cache,cached:true})}
+    const user=await redis.get("user:"+pr.userId),c=oauth();c.setCredentials(user.tokens);
+    const range="'"+pr.sheetName.replace(/'/g,"''")+"'!A:ZZ";
+    const result=await google.sheets({version:"v4",auth:c}).spreadsheets.values.get({spreadsheetId:pr.spreadsheetId,range,valueRenderOption:"UNFORMATTED_VALUE"});
+    const values=result.data.values||[],headers=(values[0]||[]).map((v,i)=>String(v||"column_"+(i+1)));
+    let rows=values.slice(1).filter(r=>r.some(v=>v!==""&&v!==null)).map(r=>Object.fromEntries(headers.map((h,i)=>[h,r[i]??null])));
+    const search=u.searchParams.get("search");if(search)rows=rows.filter(r=>JSON.stringify(r).toLowerCase().includes(search.toLowerCase()));
+    const total=rows.length,limit=Math.min(1000,Math.max(1,Number(u.searchParams.get("limit")||100))),offset=Math.max(0,Number(u.searchParams.get("offset")||0));
+    const out={success:true,project:pr.slug,sheet:pr.sheetName,total,limit,offset,data:rows.slice(offset,offset+limit)};
+    if(pr.cacheSeconds>0)await redis.set("data:"+pr.slug,out,{ex:pr.cacheSeconds});
+    return await tracked(200,{...out,cached:false});
+   }catch(routeError){await bump("errors");throw routeError}
+  }
   if(p.startsWith("/api/projects/")&&req.method==="DELETE"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const id=p.split("/").pop(),all=await redis.get("projects:"+s.userId)||[],pr=all.find(x=>x.id===id);if(!pr)return send(res,404,{error:"Not found"});await redis.set("projects:"+s.userId,all.filter(x=>x.id!==id),{ex:31536000});await redis.del("project:"+pr.slug,"data:"+pr.slug);return send(res,200,{success:true})}
   return send(res,404,{success:false,error:"Route not found"});
  }catch(e){console.error(e);return send(res,500,{success:false,error:e.message||"Internal error"})}
