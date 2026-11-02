@@ -7,6 +7,9 @@ const hash=x=>crypto.createHash("sha256").update(x).digest("hex");
 const safeHashEqual=(a,b)=>{if(typeof a!=="string"||typeof b!=="string")return false;const x=Buffer.from(a,"hex"),y=Buffer.from(b,"hex");return x.length===y.length&&crypto.timingSafeEqual(x,y)};
 const clientIp=req=>String(req.headers["x-forwarded-for"]||req.headers["x-real-ip"]||"unknown").split(",")[0].trim();
 const random=()=>crypto.randomBytes(32).toString("hex");
+const cacheStaleSeconds=()=>Math.max(30,Math.min(Number(process.env.CACHE_STALE_SECONDS)||300,3600));
+async function bumpCacheVersion(slug){const p=redis.pipeline();p.incr("cachever:"+slug);p.set("cachever_at:"+slug,Date.now(),{ex:31536000});return p.exec()}
+
 const oauth=()=>new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID,process.env.GOOGLE_CLIENT_SECRET,process.env.GOOGLE_REDIRECT_URI);
 const send=(res,status,data)=>res.status(status).json(data);
 function cookies(req){return Object.fromEntries((req.headers.cookie||"").split(";").map(x=>x.trim()).filter(Boolean).map(x=>{const i=x.indexOf("=");return[x.slice(0,i),decodeURIComponent(x.slice(i+1))]}))}
@@ -35,7 +38,7 @@ export default async function handler(req,res){
   if(manage&&req.method==="GET"&&manage[2]==="audit"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const pr=await ownedProject(manage[1],s.userId);if(!pr)return send(res,404,{error:"Project not found"});const limit=Math.min(200,Math.max(1,Number(u.searchParams.get("limit")||50)));const logs=await redis.lrange("audit:"+pr.id,0,limit-1);return send(res,200,{success:true,logs:(logs||[]).map(x=>typeof x==="string"?JSON.parse(x):x)})}
   if(manage&&req.method==="GET"&&manage[2]==="analytics"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const pr=await ownedProject(manage[1],s.userId);if(!pr)return send(res,404,{error:"Project not found"});return send(res,200,{success:true,stats:await redis.get("stats:"+pr.id)||{requests:0,success:0,errors:0}})}
   if(manage&&manage[2]==="key"&&req.method==="POST"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const pr=await ownedProject(manage[1],s.userId);if(!pr)return send(res,404,{error:"Project not found"});const key="s249_"+random();pr.apiKeyHash=hash(key);const list=await redis.get("projects:"+s.userId)||[];await redis.set("projects:"+s.userId,list.map(x=>x.id===pr.id?pr:x),{ex:31536000});await redis.set("project:"+pr.slug,pr,{ex:31536000});return send(res,200,{success:true,apiKey:key})}
-  if(manage&&manage[2]==="settings"&&req.method==="PATCH"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const pr=await ownedProject(manage[1],s.userId);if(!pr)return send(res,404,{error:"Project not found"});const b=await body(req);if(b.access!==undefined){if(!["public","private"].includes(b.access))return send(res,400,{error:"Invalid access mode"});pr.access=b.access}if(b.allowWrite!==undefined){pr.allowWrite=!!b.allowWrite;pr.permissions={...(pr.permissions||{read:true}),write:!!b.allowWrite}}if(b.permissions!==undefined){if(!b.permissions||typeof b.permissions!=="object"||Array.isArray(b.permissions))return send(res,400,{error:"permissions must be an object"});pr.permissions={read:b.permissions.read!==false,write:b.permissions.write===true};pr.allowWrite=pr.permissions.write}if(b.allowedIps!==undefined){if(!Array.isArray(b.allowedIps)||b.allowedIps.length>50||b.allowedIps.some(x=>typeof x!=="string"||x.length>64))return send(res,400,{error:"allowedIps must be an array of up to 50 IP addresses"});pr.allowedIps=[...new Set(b.allowedIps)]}if(b.cacheSeconds!==undefined)pr.cacheSeconds=Math.max(0,Math.min(Number(b.cacheSeconds)||0,86400));const list=await redis.get("projects:"+s.userId)||[];await redis.set("projects:"+s.userId,list.map(x=>x.id===pr.id?pr:x),{ex:31536000});await redis.set("project:"+pr.slug,pr,{ex:31536000});await redis.incr("cachever:"+pr.slug);return send(res,200,{success:true,project:{id:pr.id,access:pr.access,cacheSeconds:pr.cacheSeconds}})}
+  if(manage&&manage[2]==="settings"&&req.method==="PATCH"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const pr=await ownedProject(manage[1],s.userId);if(!pr)return send(res,404,{error:"Project not found"});const b=await body(req);if(b.access!==undefined){if(!["public","private"].includes(b.access))return send(res,400,{error:"Invalid access mode"});pr.access=b.access}if(b.allowWrite!==undefined){pr.allowWrite=!!b.allowWrite;pr.permissions={...(pr.permissions||{read:true}),write:!!b.allowWrite}}if(b.permissions!==undefined){if(!b.permissions||typeof b.permissions!=="object"||Array.isArray(b.permissions))return send(res,400,{error:"permissions must be an object"});pr.permissions={read:b.permissions.read!==false,write:b.permissions.write===true};pr.allowWrite=pr.permissions.write}if(b.allowedIps!==undefined){if(!Array.isArray(b.allowedIps)||b.allowedIps.length>50||b.allowedIps.some(x=>typeof x!=="string"||x.length>64))return send(res,400,{error:"allowedIps must be an array of up to 50 IP addresses"});pr.allowedIps=[...new Set(b.allowedIps)]}if(b.cacheSeconds!==undefined)pr.cacheSeconds=Math.max(0,Math.min(Number(b.cacheSeconds)||0,86400));const list=await redis.get("projects:"+s.userId)||[];await redis.set("projects:"+s.userId,list.map(x=>x.id===pr.id?pr:x),{ex:31536000});await redis.set("project:"+pr.slug,pr,{ex:31536000});await bumpCacheVersion(pr.slug);return send(res,200,{success:true,project:{id:pr.id,access:pr.access,cacheSeconds:pr.cacheSeconds}})}
   const refresh=p.match(/^\/api\/projects\/([^/]+)\/refresh$/);if(refresh&&req.method==="POST"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const all=await redis.get("projects:"+s.userId)||[],pr=all.find(x=>x.id===refresh[1]);if(!pr)return send(res,404,{error:"Project not found"});await redis.incr("cachever:"+pr.slug);return send(res,200,{success:true})}
   const data=p.match(/^\/api\/v1\/([^/]+)\/([^/]+)$/);
   if(data&&["GET","POST","PUT","PATCH","DELETE"].includes(req.method)){
@@ -102,17 +105,33 @@ export default async function handler(req,res){
     const cacheVersion=await redis.get("cachever:"+pr.slug)||0;
     const cacheIdentity=JSON.stringify({sheet:pr.sheetName,search:searchParam.toLowerCase(),limit:requestedLimit,offset:requestedOffset,version:cacheVersion});
     const cacheKey="data:"+pr.slug+":"+hash(cacheIdentity);
-    if(pr.cacheSeconds>0){const cache=await redis.get(cacheKey);if(cache)return await tracked(200,{...cache,cached:true})}
-    const user=await redis.get("user:"+pr.userId),c=oauth();c.setCredentials(user.tokens);
-    const range="'"+pr.sheetName.replace(/'/g,"''")+"'!A:ZZ";
-    const result=await google.sheets({version:"v4",auth:c}).spreadsheets.values.get({spreadsheetId:pr.spreadsheetId,range,valueRenderOption:"UNFORMATTED_VALUE"});
-    const values=result.data.values||[],headers=(values[0]||[]).map((v,i)=>String(v||"column_"+(i+1)));
-    let rows=values.slice(1).filter(r=>r.some(v=>v!==""&&v!==null)).map(r=>Object.fromEntries(headers.map((h,i)=>[h,r[i]??null])));
-    if(searchParam)rows=rows.filter(r=>JSON.stringify(r).toLowerCase().includes(searchParam.toLowerCase()));
-    const total=rows.length,limit=requestedLimit===null?total:Number(requestedLimit),offset=Number(requestedOffset);
-    const out={success:true,project:pr.slug,sheet:pr.sheetName,total,limit,offset,data:rows.slice(offset,offset+limit)};
-    if(pr.cacheSeconds>0)await redis.set(cacheKey,out,{ex:pr.cacheSeconds});
-    return await tracked(200,{...out,cached:false});
+    const refreshData=async()=>{
+     const user=await redis.get("user:"+pr.userId),c=oauth();c.setCredentials(user.tokens);
+     const range="'"+pr.sheetName.replace(/'/g,"''")+"'!A:ZZ";
+     const result=await google.sheets({version:"v4",auth:c}).spreadsheets.values.get({spreadsheetId:pr.spreadsheetId,range,valueRenderOption:"UNFORMATTED_VALUE"});
+     const values=result.data.values||[],headers=(values[0]||[]).map((v,i)=>String(v||"column_"+(i+1)));
+     let rows=values.slice(1).filter(r=>r.some(v=>v!==""&&v!==null)).map(r=>Object.fromEntries(headers.map((h,i)=>[h,r[i]??null])));
+     if(searchParam)rows=rows.filter(r=>JSON.stringify(r).toLowerCase().includes(searchParam.toLowerCase()));
+     const total=rows.length,limit=requestedLimit===null?total:Number(requestedLimit),offset=Number(requestedOffset);
+     const payload={success:true,project:pr.slug,sheet:pr.sheetName,total,limit,offset,data:rows.slice(offset,offset+limit)};
+     if(pr.cacheSeconds>0)await redis.set(cacheKey,{payload,cachedAt:Date.now()},{ex:pr.cacheSeconds+cacheStaleSeconds()});
+     return payload;
+    };
+    if(pr.cacheSeconds>0){
+     const cached=await redis.get(cacheKey);
+     if(cached?.payload){
+      const age=Math.max(0,Date.now()-Number(cached.cachedAt||0)),freshFor=pr.cacheSeconds*1000;
+      if(age<=freshFor)return await tracked(200,{...cached.payload,cached:true,cacheState:"fresh"});
+      const lockKey="cache-refresh:"+hash(cacheKey),lock=await redis.set(lockKey,"1",{nx:true,ex:30});
+      if(lock==="OK"){
+       refreshData().catch(async err=>{console.error("Stale cache refresh failed",err);try{await redis.del(lockKey)}catch{}});
+       return await tracked(200,{...cached.payload,cached:true,stale:true,cacheState:"stale"});
+      }
+      return await tracked(200,{...cached.payload,cached:true,stale:true,cacheState:"refreshing"});
+     }
+    }
+    const out=await refreshData();
+    return await tracked(200,{...out,cached:false,cacheState:"miss"});
    }catch(routeError){await bump("errors");throw routeError}
   }
   if(p.startsWith("/api/projects/")&&req.method==="DELETE"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const id=p.split("/").pop(),all=await redis.get("projects:"+s.userId)||[],pr=all.find(x=>x.id===id);if(!pr)return send(res,404,{error:"Not found"});await redis.set("projects:"+s.userId,all.filter(x=>x.id!==id),{ex:31536000});await redis.del("project:"+pr.slug,"cachever:"+pr.slug);return send(res,200,{success:true})}
