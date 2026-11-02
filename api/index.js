@@ -45,7 +45,7 @@ export default async function handler(req,res){
   if(data&&["GET","POST","PUT","PATCH","DELETE"].includes(req.method)){
    const pr=await redis.get("project:"+data[1]);
    if(!pr)return send(res,404,{success:false,error:"Project not found"});
-   const bump=async(field)=>{const k="stats:"+pr.id;await redis.eval("local v=redis.call('GET',KEYS[1]); local s={requests=0,success=0,errors=0}; if v then s=cjson.decode(v) end; s[ARGV[1]]=(tonumber(s[ARGV[1]]) or 0)+1; redis.call('SET',KEYS[1],cjson.encode(s),'EX',31536000); return s[ARGV[1]]",[k],[field]);};
+   const bump=async(field)=>{const k="stats:"+pr.id,day=new Date().toISOString().slice(0,10),dk="stats:daily:"+pr.id+":"+day;const script="for i=1,2 do local v=redis.call('GET',KEYS[i]); local s={requests=0,success=0,errors=0}; if v then s=cjson.decode(v) end; s[ARGV[1]]=(tonumber(s[ARGV[1]]) or 0)+1; redis.call('SET',KEYS[i],cjson.encode(s),'EX',ARGV[2]); end; return 1";await redis.eval(script,[k,dk],[field,field==="requests"?31536000:7776000]);};
    const ip=clientIp(req);
    const allowedIps=Array.isArray(pr.allowedIps)?pr.allowedIps:[];
    if(allowedIps.length&&!allowedIps.includes(ip))return send(res,403,{success:false,error:"IP address is not allowed for this project"});
