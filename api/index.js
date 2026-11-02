@@ -9,7 +9,7 @@ const oauth=()=>new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID,process.env.
 const send=(res,status,data)=>res.status(status).json(data);
 function cookies(req){return Object.fromEntries((req.headers.cookie||"").split(";").map(x=>x.trim()).filter(Boolean).map(x=>{const i=x.indexOf("=");return[x.slice(0,i),decodeURIComponent(x.slice(i+1))]}))}
 async function session(req){const t=cookies(req)[COOKIE];return t?redis.get("session:"+hash(t)):null}
-async function body(req){if(req.body&&typeof req.body==="object")return req.body;let s="";for await(const c of req)s+=c;try{return JSON.parse(s||"{}")}catch{return{}}}
+async function body(req){if(req.body&&typeof req.body==="object")return req.body;let s="",size=0;for await(const c of req){size+=Buffer.byteLength(c);if(size>1048576)throw new Error("Request body exceeds 1 MB");s+=c}try{return JSON.parse(s||"{}")}catch{return{}}}
 const slug=s=>String(s||"").toLowerCase().trim().replace(/[^a-z0-9-]+/g,"-").replace(/^-|-$/g,"").slice(0,60);
 export default async function handler(req,res){
  res.setHeader("Access-Control-Allow-Origin",process.env.CORS_ORIGINS||"*");res.setHeader("Access-Control-Allow-Headers","Content-Type,X-API-Key");res.setHeader("Access-Control-Allow-Methods","GET,POST,PUT,PATCH,DELETE,OPTIONS");if(req.method==="OPTIONS")return res.status(204).end();
@@ -28,13 +28,20 @@ export default async function handler(req,res){
   const manage=p.match(/^\/api\/projects\/([^/]+)\/(key|settings|analytics)$/);
   if(manage&&req.method==="GET"&&manage[2]==="analytics"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const pr=await ownedProject(manage[1],s.userId);if(!pr)return send(res,404,{error:"Project not found"});return send(res,200,{success:true,stats:await redis.get("stats:"+pr.id)||{requests:0,success:0,errors:0}})}
   if(manage&&manage[2]==="key"&&req.method==="POST"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const pr=await ownedProject(manage[1],s.userId);if(!pr)return send(res,404,{error:"Project not found"});const key="s249_"+random();pr.apiKeyHash=hash(key);const list=await redis.get("projects:"+s.userId)||[];await redis.set("projects:"+s.userId,list.map(x=>x.id===pr.id?pr:x),{ex:31536000});await redis.set("project:"+pr.slug,pr,{ex:31536000});return send(res,200,{success:true,apiKey:key})}
-  if(manage&&manage[2]==="settings"&&req.method==="PATCH"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const pr=await ownedProject(manage[1],s.userId);if(!pr)return send(res,404,{error:"Project not found"});const b=await body(req);if(b.access!==undefined){if(!["public","private"].includes(b.access))return send(res,400,{error:"Invalid access mode"});pr.access=b.access}if(b.allowWrite!==undefined)pr.allowWrite=!!b.allowWrite;if(b.cacheSeconds!==undefined)pr.cacheSeconds=Math.max(0,Math.min(Number(b.cacheSeconds)||0,86400));const list=await redis.get("projects:"+s.userId)||[];await redis.set("projects:"+s.userId,list.map(x=>x.id===pr.id?pr:x),{ex:31536000});await redis.set("project:"+pr.slug,pr,{ex:31536000});await redis.del("data:"+pr.slug);return send(res,200,{success:true,project:{id:pr.id,access:pr.access,cacheSeconds:pr.cacheSeconds}})}
-  const refresh=p.match(/^\/api\/projects\/([^/]+)\/refresh$/);if(refresh&&req.method==="POST"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const all=await redis.get("projects:"+s.userId)||[],pr=all.find(x=>x.id===refresh[1]);if(!pr)return send(res,404,{error:"Project not found"});await redis.del("data:"+pr.slug);return send(res,200,{success:true})}
+  if(manage&&manage[2]==="settings"&&req.method==="PATCH"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const pr=await ownedProject(manage[1],s.userId);if(!pr)return send(res,404,{error:"Project not found"});const b=await body(req);if(b.access!==undefined){if(!["public","private"].includes(b.access))return send(res,400,{error:"Invalid access mode"});pr.access=b.access}if(b.allowWrite!==undefined)pr.allowWrite=!!b.allowWrite;if(b.cacheSeconds!==undefined)pr.cacheSeconds=Math.max(0,Math.min(Number(b.cacheSeconds)||0,86400));const list=await redis.get("projects:"+s.userId)||[];await redis.set("projects:"+s.userId,list.map(x=>x.id===pr.id?pr:x),{ex:31536000});await redis.set("project:"+pr.slug,pr,{ex:31536000});await redis.incr("cachever:"+pr.slug);return send(res,200,{success:true,project:{id:pr.id,access:pr.access,cacheSeconds:pr.cacheSeconds}})}
+  const refresh=p.match(/^\/api\/projects\/([^/]+)\/refresh$/);if(refresh&&req.method==="POST"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const all=await redis.get("projects:"+s.userId)||[],pr=all.find(x=>x.id===refresh[1]);if(!pr)return send(res,404,{error:"Project not found"});await redis.incr("cachever:"+pr.slug);return send(res,200,{success:true})}
   const data=p.match(/^\/api\/v1\/([^/]+)\/([^/]+)$/);
   if(data&&["GET","POST","PUT","PATCH","DELETE"].includes(req.method)){
    const pr=await redis.get("project:"+data[1]);
    if(!pr)return send(res,404,{success:false,error:"Project not found"});
-   const bump=async(field)=>{const k="stats:"+pr.id,s=await redis.get(k)||{requests:0,success:0,errors:0};s[field]=(Number(s[field])||0)+1;await redis.set(k,s,{ex:31536000});};
+   const bump=async(field)=>{const k="stats:"+pr.id;await redis.eval("local v=redis.call('GET',KEYS[1]); local s={requests=0,success=0,errors=0}; if v then s=cjson.decode(v) end; s[ARGV[1]]=(tonumber(s[ARGV[1]]) or 0)+1; redis.call('SET',KEYS[1],cjson.encode(s),'EX',31536000); return s[ARGV[1]]",[k],[field]);};
+   const forwarded=String(req.headers["x-forwarded-for"]||"").split(",")[0].trim();
+   const ip=forwarded||String(req.headers["x-real-ip"]||"unknown");
+   const rateKey="ratelimit:"+pr.id+":"+hash(ip);
+   const rateLimit=req.method==="GET"?120:30;
+   const rateCount=Number(await redis.eval("local n=redis.call('INCR',KEYS[1]); if n==1 then redis.call('EXPIRE',KEYS[1],60) end; return n",[rateKey],[]));
+   res.setHeader("X-RateLimit-Limit",String(rateLimit));res.setHeader("X-RateLimit-Remaining",String(Math.max(0,rateLimit-rateCount)));
+   if(rateCount>rateLimit){res.setHeader("Retry-After","60");return send(res,429,{success:false,error:"Rate limit exceeded. Try again in 60 seconds."})}
    await bump("requests");
    const tracked=async(status,payload)=>{await bump(status>=200&&status<400?"success":"errors");return send(res,status,payload)};
    try{
@@ -53,7 +60,7 @@ export default async function handler(req,res){
       if(!headers.length)return await tracked(400,{success:false,error:"First row must contain column headers"});
       const values=rows.map(x=>headers.map(h=>x[h]??""));
       const result=await sheets.spreadsheets.values.append({spreadsheetId:pr.spreadsheetId,range:quoted+"!A:ZZ",valueInputOption:"USER_ENTERED",insertDataOption:"INSERT_ROWS",requestBody:{values}});
-      await redis.del("data:"+pr.slug);
+      await redis.incr("cachever:"+pr.slug);
       return await tracked(201,{success:true,insertedRows:values.length,updatedRange:result.data.updates?.updatedRange});
      }
      const row=Number(u.searchParams.get("row")??b.row);
@@ -65,7 +72,7 @@ export default async function handler(req,res){
       const meta=await sheets.spreadsheets.get({spreadsheetId:pr.spreadsheetId,fields:"sheets(properties(sheetId,title))"}),sh=meta.data.sheets?.find(x=>x.properties.title===pr.sheetName);
       if(!sh)return await tracked(404,{success:false,error:"Sheet not found"});
       await sheets.spreadsheets.batchUpdate({spreadsheetId:pr.spreadsheetId,requestBody:{requests:[{deleteDimension:{range:{sheetId:sh.properties.sheetId,dimension:"ROWS",startIndex:row-1,endIndex:row}}}]}});
-      await redis.del("data:"+pr.slug);
+      await redis.incr("cachever:"+pr.slug);
       return await tracked(200,{success:true,deletedRow:row});
      }
      const meta=await sheets.spreadsheets.values.get({spreadsheetId:pr.spreadsheetId,range:quoted+"!1:1"}),headers=meta.data.values?.[0]||[];
@@ -73,23 +80,32 @@ export default async function handler(req,res){
      const next=req.method==="PUT"?Object.fromEntries(headers.map(h=>[h,b.data?.[h]??""])):{...old,...(b.data||b)};
      const values=[headers.map(h=>next[h]??"")];
      await sheets.spreadsheets.values.update({spreadsheetId:pr.spreadsheetId,range,valueInputOption:"USER_ENTERED",requestBody:{values}});
-     await redis.del("data:"+pr.slug);
+     await redis.incr("cachever:"+pr.slug);
      return await tracked(200,{success:true,updatedRow:row,data:next});
     }
-    if(pr.cacheSeconds>0){const cache=await redis.get("data:"+pr.slug);if(cache)return await tracked(200,{...cache,cached:true})}
+    const searchParam=u.searchParams.get("search")||"";
+    const requestedLimit=u.searchParams.get("limit");
+    const requestedOffset=u.searchParams.get("offset")||"0";
+    if(searchParam.length>200)return await tracked(400,{success:false,error:"search must be 200 characters or fewer"});
+    if(requestedLimit!==null&&(!Number.isInteger(Number(requestedLimit))||Number(requestedLimit)<1||Number(requestedLimit)>1000))return await tracked(400,{success:false,error:"limit must be an integer between 1 and 1000"});
+    if(!/^\d+$/.test(requestedOffset)||Number(requestedOffset)>10000000)return await tracked(400,{success:false,error:"offset must be a non-negative integer no greater than 10000000"});
+    const cacheVersion=await redis.get("cachever:"+pr.slug)||0;
+    const cacheIdentity=JSON.stringify({sheet:pr.sheetName,search:searchParam.toLowerCase(),limit:requestedLimit,offset:requestedOffset,version:cacheVersion});
+    const cacheKey="data:"+pr.slug+":"+hash(cacheIdentity);
+    if(pr.cacheSeconds>0){const cache=await redis.get(cacheKey);if(cache)return await tracked(200,{...cache,cached:true})}
     const user=await redis.get("user:"+pr.userId),c=oauth();c.setCredentials(user.tokens);
     const range="'"+pr.sheetName.replace(/'/g,"''")+"'!A:ZZ";
     const result=await google.sheets({version:"v4",auth:c}).spreadsheets.values.get({spreadsheetId:pr.spreadsheetId,range,valueRenderOption:"UNFORMATTED_VALUE"});
     const values=result.data.values||[],headers=(values[0]||[]).map((v,i)=>String(v||"column_"+(i+1)));
     let rows=values.slice(1).filter(r=>r.some(v=>v!==""&&v!==null)).map(r=>Object.fromEntries(headers.map((h,i)=>[h,r[i]??null])));
-    const search=u.searchParams.get("search");if(search)rows=rows.filter(r=>JSON.stringify(r).toLowerCase().includes(search.toLowerCase()));
-    const total=rows.length,requestedLimit=u.searchParams.get("limit"),limit=requestedLimit===null?total:Math.min(1000,Math.max(1,Number(requestedLimit)||1)),offset=Math.max(0,Number(u.searchParams.get("offset")||0));
+    if(searchParam)rows=rows.filter(r=>JSON.stringify(r).toLowerCase().includes(searchParam.toLowerCase()));
+    const total=rows.length,limit=requestedLimit===null?total:Number(requestedLimit),offset=Number(requestedOffset);
     const out={success:true,project:pr.slug,sheet:pr.sheetName,total,limit,offset,data:rows.slice(offset,offset+limit)};
-    if(pr.cacheSeconds>0)await redis.set("data:"+pr.slug,out,{ex:pr.cacheSeconds});
+    if(pr.cacheSeconds>0)await redis.set(cacheKey,out,{ex:pr.cacheSeconds});
     return await tracked(200,{...out,cached:false});
    }catch(routeError){await bump("errors");throw routeError}
   }
-  if(p.startsWith("/api/projects/")&&req.method==="DELETE"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const id=p.split("/").pop(),all=await redis.get("projects:"+s.userId)||[],pr=all.find(x=>x.id===id);if(!pr)return send(res,404,{error:"Not found"});await redis.set("projects:"+s.userId,all.filter(x=>x.id!==id),{ex:31536000});await redis.del("project:"+pr.slug,"data:"+pr.slug);return send(res,200,{success:true})}
+  if(p.startsWith("/api/projects/")&&req.method==="DELETE"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const id=p.split("/").pop(),all=await redis.get("projects:"+s.userId)||[],pr=all.find(x=>x.id===id);if(!pr)return send(res,404,{error:"Not found"});await redis.set("projects:"+s.userId,all.filter(x=>x.id!==id),{ex:31536000});await redis.del("project:"+pr.slug,"cachever:"+pr.slug);return send(res,200,{success:true})}
   return send(res,404,{success:false,error:"Route not found"});
  }catch(e){console.error(e);return send(res,500,{success:false,error:e.message||"Internal error"})}
 }
