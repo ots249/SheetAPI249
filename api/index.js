@@ -83,7 +83,7 @@ export default async function handler(req,res){
     const values=result.data.values||[],headers=(values[0]||[]).map((v,i)=>String(v||"column_"+(i+1)));
     let rows=values.slice(1).filter(r=>r.some(v=>v!==""&&v!==null)).map(r=>Object.fromEntries(headers.map((h,i)=>[h,r[i]??null])));
     const search=u.searchParams.get("search");if(search)rows=rows.filter(r=>JSON.stringify(r).toLowerCase().includes(search.toLowerCase()));
-    const total=rows.length,limit=Math.min(1000,Math.max(1,Number(u.searchParams.get("limit")||100))),offset=Math.max(0,Number(u.searchParams.get("offset")||0));
+    const total=rows.length,requestedLimit=u.searchParams.get("limit"),limit=requestedLimit===null?total:Math.min(1000,Math.max(1,Number(requestedLimit)||1)),offset=Math.max(0,Number(u.searchParams.get("offset")||0));
     const out={success:true,project:pr.slug,sheet:pr.sheetName,total,limit,offset,data:rows.slice(offset,offset+limit)};
     if(pr.cacheSeconds>0)await redis.set("data:"+pr.slug,out,{ex:pr.cacheSeconds});
     return await tracked(200,{...out,cached:false});
