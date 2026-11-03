@@ -33,6 +33,29 @@ export default async function handler(req,res){
   const tabs=p.match(/^\/api\/sheets\/([^/]+)\/tabs$/);if(tabs&&req.method==="GET"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const spreadsheetId=decodeURIComponent(tabs[1]);const user=await redis.get("user:"+s.userId),c=oauth();c.setCredentials(user.tokens);const meta=await google.sheets({version:"v4",auth:c}).spreadsheets.get({spreadsheetId,fields:"spreadsheetId,properties(title),sheets(properties(sheetId,title,index))"});return send(res,200,{success:true,spreadsheetId,title:meta.data.properties?.title,tabs:(meta.data.sheets||[]).map(x=>x.properties)})}
   if(p==="/api/projects"&&req.method==="GET"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});return send(res,200,{success:true,projects:await redis.get("projects:"+s.userId)||[]})}
   if(p==="/api/projects"&&req.method==="POST"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const b=await body(req),name=slug(b.name);if(!name||!b.spreadsheetId||!b.sheetName)return send(res,400,{error:"name, spreadsheetId and sheetName required"});if(await redis.get("project:"+name))return send(res,409,{error:"Project name already exists"});const key="s249_"+random(),project={id:random(),userId:s.userId,name:b.name,slug:name,spreadsheetId:b.spreadsheetId,sheetName:String(b.sheetName),access:b.access==="private"?"private":"public",allowWrite:b.allowWrite===true,cacheSeconds:Math.max(0,Math.min(Number(b.cacheSeconds??60),86400)),apiKeyHash:hash(key),permissions:{read:true,write:b.allowWrite===true},allowedIps:Array.isArray(b.allowedIps)?b.allowedIps.filter(x=>typeof x==="string").slice(0,50):[]};const all=await redis.get("projects:"+s.userId)||[];all.push(project);await redis.set("projects:"+s.userId,all,{ex:31536000});await redis.set("project:"+name,project,{ex:31536000});return send(res,201,{success:true,project:{...project,apiKey:key}})}
+  const projectManage=p.match(/^\\/api\\/projects\\/([^/]+)$/);
+  if(projectManage&&["PATCH","DELETE"].includes(req.method)){
+   const s=await session(req);if(!s)return send(res,401,{error:"Login required"});
+   const list=await redis.get("projects:"+s.userId)||[],pr=list.find(x=>x.id===projectManage[1]);
+   if(!pr)return send(res,404,{error:"Project not found"});
+   if(req.method==="PATCH"){
+    const b=await body(req),next={...pr};
+    if(b.name!==undefined){const n=String(b.name).trim(),newSlug=slug(n);if(!n||!newSlug)return send(res,400,{error:"Valid project name is required"});const conflict=list.some(x=>x.id!==pr.id&&x.slug===newSlug);if(conflict||await redis.get("project:"+newSlug)&&newSlug!==pr.slug)return send(res,409,{error:"Project name already exists"});next.name=n;next.slug=newSlug}
+    if(b.spreadsheetId!==undefined){const id=String(b.spreadsheetId).trim();if(!/^[a-zA-Z0-9_-]{20,}$/.test(id))return send(res,400,{error:"Invalid Google Sheets ID"});next.spreadsheetId=id}
+    if(b.sheetName!==undefined){const tab=String(b.sheetName).trim();if(!tab||tab.length>200)return send(res,400,{error:"Valid sheet name is required"});next.sheetName=tab}
+    const updated=list.map(x=>x.id===pr.id?next:x);
+    await redis.set("projects:"+s.userId,updated,{ex:31536000});
+    if(next.slug!==pr.slug)await redis.del("project:"+pr.slug);
+    await redis.set("project:"+next.slug,next,{ex:31536000});
+    await bumpCacheVersion(pr.slug);if(next.slug!==pr.slug)await bumpCacheVersion(next.slug);
+    return send(res,200,{success:true,project:{id:next.id,name:next.name,slug:next.slug,spreadsheetId:next.spreadsheetId,sheetName:next.sheetName}});
+   }
+   const remaining=list.filter(x=>x.id!==pr.id);
+   const pipe=redis.pipeline();pipe.set("projects:"+s.userId,remaining,{ex:31536000});pipe.del("project:"+pr.slug,"stats:"+pr.id,"errors:"+pr.id,"audit:"+pr.id,"cachever:"+pr.slug,"cachever_at:"+pr.slug);
+   for(let i=0;i<90;i++){const d=new Date();d.setUTCDate(d.getUTCDate()-i);pipe.del("stats:daily:"+pr.id+":"+d.toISOString().slice(0,10))}
+   await pipe.exec();
+   return send(res,200,{success:true,deleted:true});
+  }
   const ownedProject=async(id,userId)=>{const list=await redis.get("projects:"+userId)||[];return list.find(x=>x.id===id)||null};
   const manage=p.match(/^\/api\/projects\/([^/]+)\/(key|settings|analytics|audit|errors)$/);
   if(manage&&req.method==="GET"&&manage[2]==="audit"){const s=await session(req);if(!s)return send(res,401,{error:"Login required"});const pr=await ownedProject(manage[1],s.userId);if(!pr)return send(res,404,{error:"Project not found"});const limit=Math.min(200,Math.max(1,Number(u.searchParams.get("limit")||50)));const logs=await redis.lrange("audit:"+pr.id,0,limit-1);return send(res,200,{success:true,logs:(logs||[]).map(x=>typeof x==="string"?JSON.parse(x):x)})}
