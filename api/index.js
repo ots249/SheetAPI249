@@ -152,6 +152,7 @@ export default async function handler(req,res){
      const values=result.data.values||[],headers=(values[0]||[]).map((v,i)=>String(v||"column_"+(i+1)));
      let rows=values.slice(1).filter(r=>r.some(v=>v!==""&&v!==null)).map(r=>Object.fromEntries(headers.map((h,i)=>[h,r[i]??null])));
      if(searchParam)rows=rows.filter(r=>JSON.stringify(r).toLowerCase().includes(searchParam.toLowerCase()));
+     rows=rows.map((r,i)=>({id:String(i+1),...r}));
      const total=rows.length,limit=requestedLimit===null?total:Number(requestedLimit),offset=Number(requestedOffset);
      const payload={success:true,project:pr.slug,sheet:pr.sheetName,total,limit,offset,data:rows.slice(offset,offset+limit)};
      if(pr.cacheSeconds>0)await redis.set(cacheKey,{payload,cachedAt:Date.now()},{ex:pr.cacheSeconds+cacheStaleSeconds()});
