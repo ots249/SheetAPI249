@@ -1,0 +1,24 @@
+{
+  "id": "/",
+  "name": "SheetAPI 249",
+  "short_name": "SheetAPI",
+  "description": "Manage Google Sheets JSON APIs from your workspace.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "display_override": [
+    "standalone",
+    "minimal-ui"
+  ],
+  "orientation": "any",
+  "background_color": "#071321",
+  "theme_color": "#071b55",
+  "icons": [
+    {
+      "src": "/sheetapi249.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
