@@ -157,3 +157,13 @@ html{scroll-behavior:smooth}
 .installed-pill{display:inline-flex;align-items:center;padding:9px 12px;border:1px solid #61d8b544;border-radius:9px;color:#75dcbf;background:#61d8b510;font-size:10px;font-weight:700;white-space:nowrap}
 :root[data-theme="light"] .install-app-btn{background:#eaf8f3;color:#18775d;border-color:#bfe6d7}
 @media(max-width:600px){.topbar{gap:8px}.topnote{display:none}.install-app-btn{padding:9px 10px;font-size:10px}.topbar .ghost{padding:9px 10px;font-size:10px}}
+
+/* Dedicated workspace settings page */
+.settings-page{max-width:980px;margin:0 auto 34px}
+.settings-page-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin:8px 0 22px}
+.settings-page-head h2{font:700 27px 'Space Grotesk',sans-serif;letter-spacing:-.6px;color:#edf5fb;margin:5px 0}
+.settings-page-head p{font-size:12px;color:#91a5b8;margin:0}
+.settings-page-head .secondary{padding:10px 14px;font-size:11px;white-space:nowrap}
+:root[data-theme="light"] .settings-page-head h2{color:#172638}
+:root[data-theme="light"] .settings-page-head p{color:#667d8e}
+@media(max-width:520px){.settings-page-head{align-items:flex-start;flex-direction:column}.settings-page-head h2{font-size:23px}.settings-page-head .secondary{width:100%}}
