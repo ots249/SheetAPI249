@@ -22,6 +22,7 @@ function cookies(req){return Object.fromEntries((req.headers.cookie||"").split("
 async function session(req){const t=cookies(req)[COOKIE];return t?redis.get("session:"+hash(t)):null}
 async function body(req){if(req.body&&typeof req.body==="object")return req.body;let s="",size=0;for await(const c of req){size+=Buffer.byteLength(c);if(size>1048576){const e=new Error("Request body exceeds 1 MB");e.statusCode=413;throw e}s+=c}try{return JSON.parse(s||"{}")}catch{return{}}}
 const slug=s=>String(s||"").toLowerCase().trim().replace(/[^a-z0-9-]+/g,"-").replace(/^-|-$/g,"").slice(0,60);
+const columnLetter=n=>{let s="";while(n){const r=(n-1)%26;s=String.fromCharCode(65+r)+s;n=Math.floor((n-1)/26)}return s};
 export default async function handler(req,res){
  const origin=req.headers.origin;
  const allowedOrigins=(process.env.CORS_ORIGINS||"https://sheetapi249.vercel.app").split(",").map(x=>x.trim()).filter(Boolean);
@@ -115,6 +116,27 @@ export default async function handler(req,res){
       const result=await sheets.spreadsheets.values.append({spreadsheetId:pr.spreadsheetId,range:quoted+"!A:ZZ",valueInputOption:"USER_ENTERED",insertDataOption:"INSERT_ROWS",requestBody:{values}});
       await bumpCacheVersion(pr.slug);
       return await tracked(201,{success:true,insertedRows:values.length,updatedRange:result.data.updates?.updatedRange});
+     }
+     // Batch PATCH: update multiple existing rows with one Google Sheets batchUpdate.
+     if(req.method==="PATCH"&&Array.isArray(b.rows)){
+      if(!b.rows.length||b.rows.length>500)return await tracked(400,{success:false,error:"rows must contain between 1 and 500 updates"});
+      const meta=await sheets.spreadsheets.values.get({spreadsheetId:pr.spreadsheetId,range:quoted+"!1:1"});
+      const headers=meta.data.values?.[0]||[];
+      if(!headers.length)return await tracked(400,{success:false,error:"First row must contain column headers"});
+      const seen=new Set(),data=[];
+      for(const item of b.rows){
+       const row=Number(item?.row),patch=item?.data;
+       if(!Number.isInteger(row)||row<2||!patch||typeof patch!=="object"||Array.isArray(patch))return await tracked(400,{success:false,error:"Each update requires row >= 2 and a data object"});
+       if(seen.has(row))return await tracked(400,{success:false,error:"Duplicate row numbers are not allowed"});
+       seen.add(row);
+       const unknown=Object.keys(patch).filter(k=>!headers.includes(k));
+       if(unknown.length)return await tracked(400,{success:false,error:"Unknown column: "+unknown.join(", ")});
+       const cells=Object.entries(patch).map(([key,value])=>({range:quoted+"!"+columnLetter(headers.indexOf(key)+1)+row,values:[[value??""]]}));
+       data.push(...cells);
+      }
+      await sheets.spreadsheets.values.batchUpdate({spreadsheetId:pr.spreadsheetId,requestBody:{valueInputOption:"USER_ENTERED",data}});
+      await bumpCacheVersion(pr.slug);
+      return await tracked(200,{success:true,updatedRows:[...seen],updatedCount:seen.size});
      }
      const row=Number(u.searchParams.get("row")??b.row);
      if(!Number.isInteger(row)||row<2)return await tracked(400,{success:false,error:"Specify row number >= 2 using ?row= or body.row"});
