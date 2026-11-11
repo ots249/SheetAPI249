@@ -112,7 +112,11 @@ export default async function handler(req,res){
       if(rows.length>500)return await tracked(413,{success:false,error:"Batch limit is 500 rows per request"});
       const meta=await sheets.spreadsheets.values.get({spreadsheetId:pr.spreadsheetId,range:quoted+"!1:1"}),headers=meta.data.values?.[0]||[];
       if(!headers.length)return await tracked(400,{success:false,error:"First row must contain column headers"});
-      const values=rows.map(x=>headers.map(h=>x[h]??""));
+      const hasCreatedAt=headers.includes("created_at");
+      const values=rows.map(x=>headers.map(h=>{
+       if(hasCreatedAt&&h==="created_at")return new Date().toISOString();
+       return x[h]??"";
+      }));
       const result=await sheets.spreadsheets.values.append({spreadsheetId:pr.spreadsheetId,range:quoted+"!A:ZZ",valueInputOption:"USER_ENTERED",insertDataOption:"INSERT_ROWS",requestBody:{values}});
       await bumpCacheVersion(pr.slug);
       return await tracked(201,{success:true,insertedRows:values.length,updatedRange:result.data.updates?.updatedRange});
